@@ -27,34 +27,66 @@ static inline int nextPow2(int n) {
     return n;
 }
 
-// exclusive_scan --
-//
-// Implementation of an exclusive scan on global memory array `input`,
-// with results placed in global memory `result`.
-//
-// N is the logical size of the input and output arrays, however
-// students can assume that both the start and result arrays we
-// allocated with next power-of-two sizes as described by the comments
-// in cudaScan().  This is helpful, since your parallel scan
-// will likely write to memory locations beyond N, but of course not
-// greater than N rounded up to the next power of 2.
-//
-// Also, as per the comments in cudaScan(), you can implement an
-// "in-place" scan, since the timing harness makes a copy of input and
-// places it in result
+// Upsweep kernel for the exclusive scan
+__global__ void upsweep_kernel(int* output, int two_d, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int two_dplus1 = 2 * two_d;
+    
+    int i = idx * two_dplus1;
+    int j = i + two_dplus1 - 1;  // index to be updated
+    int k = i + two_d - 1;       // index to add
+    
+    if (i < N && j < N && k < N) {
+        output[j] += output[k];
+    }
+}
+
+// Downsweep kernel for the exclusive scan
+__global__ void downsweep_kernel(int* output, int two_d, int N) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int two_dplus1 = 2 * two_d;
+    
+    int i = idx * two_dplus1;
+    int j = i + two_dplus1 - 1;  // first index for swap and add
+    int k = i + two_d - 1;       // second index for swap and add
+    
+    if (i < N && j < N && k < N) {
+        int t = output[k];
+        output[k] = output[j];
+        output[j] += t;
+    }
+}
+
+// Main exclusive scan implementation
 void exclusive_scan(int* input, int N, int* result)
 {
-
-    // CS149 TODO:
-    //
-    // Implement your exclusive scan implementation here.  Keep in
-    // mind that although the arguments to this function are device
-    // allocated arrays, this is a function that is running in a thread
-    // on the CPU.  Your implementation will need to make multiple calls
-    // to CUDA kernel functions (that you must write) to implement the
-    // scan.
-
-
+    // Copy input to result
+    cudaMemcpy(result, input, N * sizeof(int), cudaMemcpyDeviceToDevice);
+    
+    // Upsweep phase
+    for (int two_d = 1; two_d <= N/2; two_d *= 2) {
+        int two_dplus1 = 2 * two_d;
+        int num_elements = (N + two_dplus1 - 1) / two_dplus1; // Ceiling division
+        int num_blocks = (num_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        upsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, N);
+        cudaDeviceSynchronize();
+    }
+    
+    // Set last element to 0
+    int zero = 0;
+    cudaMemcpy(&result[N-1], &zero, sizeof(int), cudaMemcpyHostToDevice);
+    
+    // Downsweep phase
+    for (int two_d = N/2; two_d >= 1; two_d /= 2) {
+        int two_dplus1 = 2 * two_d;
+        int num_elements = (N + two_dplus1 - 1) / two_dplus1; // Ceiling division
+        int num_blocks = (num_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+        downsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, N);
+        cudaDeviceSynchronize();
+    }
+    
+    // Set first element to 0 (required for exclusive scan)
+    cudaMemcpy(&result[0], &zero, sizeof(int), cudaMemcpyHostToDevice);
 }
 
 
