@@ -27,48 +27,58 @@ static inline int nextPow2(int n) {
     return n;
 }
 
-// Upsweep kernel for the exclusive scan
-__global__ void upsweep_kernel(int* output, int two_d, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int two_dplus1 = 2 * two_d;
+// Upsweep kernel with robust bounds checking
+__global__ void upsweep_kernel(int* output, int two_d, int two_dplus1, int N) {
+    // Calculate global thread index
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     
-    int i = idx * two_dplus1;
-    int j = i + two_dplus1 - 1;  // index to be updated
-    int k = i + two_d - 1;       // index to add
+    // Convert to the actual array index (using stride pattern)
+    i = i * two_dplus1;
     
-    if (i < N && j < N && k < N) {
-        output[j] += output[k];
+    // Only perform operations if indices are valid
+    if (i + two_d - 1 < N && i + two_dplus1 - 1 < N) {
+        output[i + two_dplus1 - 1] += output[i + two_d - 1];
     }
 }
 
-// Downsweep kernel for the exclusive scan
-__global__ void downsweep_kernel(int* output, int two_d, int N) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int two_dplus1 = 2 * two_d;
+// Downsweep kernel with robust bounds checking
+__global__ void downsweep_kernel(int* output, int two_d, int two_dplus1, int N) {
+    // Calculate global thread index
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
     
-    int i = idx * two_dplus1;
-    int j = i + two_dplus1 - 1;  // first index for swap and add
-    int k = i + two_d - 1;       // second index for swap and add
+    // Convert to the actual array index (using stride pattern)
+    i = i * two_dplus1;
     
-    if (i < N && j < N && k < N) {
-        int t = output[k];
-        output[k] = output[j];
-        output[j] += t;
+    // Only perform operations if indices are valid
+    if (i + two_d - 1 < N && i + two_dplus1 - 1 < N) {
+        int t = output[i + two_d - 1];
+        output[i + two_d - 1] = output[i + two_dplus1 - 1];
+        output[i + two_dplus1 - 1] += t;
     }
 }
 
-// Main exclusive scan implementation
+// Exclusive scan implementation
 void exclusive_scan(int* input, int N, int* result)
 {
-    // Copy input to result
-    cudaMemcpy(result, input, N * sizeof(int), cudaMemcpyDeviceToDevice);
+    // Copy input to result if they are different
+    if (input != result) {
+        cudaMemcpy(result, input, N * sizeof(int), cudaMemcpyDeviceToDevice);
+    }
     
     // Upsweep phase
-    for (int two_d = 1; two_d <= N/2; two_d *= 2) {
+    for (int two_d = 1; two_d < N; two_d *= 2) {
         int two_dplus1 = 2 * two_d;
-        int num_elements = (N + two_dplus1 - 1) / two_dplus1; // Ceiling division
+        
+        // Calculate number of threads needed based on stride pattern
+        int num_elements = (N + two_dplus1 - 1) / two_dplus1;
+        if (num_elements == 0) num_elements = 1; // Ensure at least one thread
+        
+        // Calculate number of blocks needed
         int num_blocks = (num_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-        upsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, N);
+        if (num_blocks == 0) num_blocks = 1; // Ensure at least one block
+        
+        // Launch kernel
+        upsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, two_dplus1, N);
         cudaDeviceSynchronize();
     }
     
@@ -79,14 +89,25 @@ void exclusive_scan(int* input, int N, int* result)
     // Downsweep phase
     for (int two_d = N/2; two_d >= 1; two_d /= 2) {
         int two_dplus1 = 2 * two_d;
-        int num_elements = (N + two_dplus1 - 1) / two_dplus1; // Ceiling division
+        
+        // Calculate number of threads needed based on stride pattern
+        int num_elements = (N + two_dplus1 - 1) / two_dplus1;
+        if (num_elements == 0) num_elements = 1; // Ensure at least one thread
+        
+        // Calculate number of blocks needed
         int num_blocks = (num_elements + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
-        downsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, N);
+        if (num_blocks == 0) num_blocks = 1; // Ensure at least one block
+        
+        // Launch kernel
+        downsweep_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(result, two_d, two_dplus1, N);
         cudaDeviceSynchronize();
     }
     
-    // Set first element to 0 (required for exclusive scan)
-    cudaMemcpy(&result[0], &zero, sizeof(int), cudaMemcpyHostToDevice);
+    // Check for any CUDA errors
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        printf("CUDA Error: %s\n", cudaGetErrorString(err));
+    }
 }
 
 
