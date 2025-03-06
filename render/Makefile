@@ -1,4 +1,3 @@
-
 EXECUTABLE := render
 
 CU_FILES   := cudaRenderer.cu benchmark.cu
@@ -8,7 +7,7 @@ CU_DEPS    :=
 CC_FILES   := main.cpp display.cpp refRenderer.cpp \
               noise.cpp ppm.cpp sceneLoader.cpp
 
-LOGS	   := logs
+LOGS       := logs
 
 ###########################################################
 
@@ -28,7 +27,10 @@ LIBS       :=
 FRAMEWORKS :=
 
 NVCCFLAGS=-O3 -m64
-LIBS += GL glut cudart
+
+# Clear LIBS first, then add libraries in the correct order
+LIBS :=
+LIBS += cudart glut X11 Xext pthread
 
 ifneq ($(wildcard /opt/cuda-8.0/.*),)
 # Latedays
@@ -61,7 +63,7 @@ check:	default
 		./checker.pl
 
 $(EXECUTABLE): dirs $(OBJS)
-		$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS) $(LDFRAMEWORKS)
+		$(CXX) $(CXXFLAGS) -o $@ $(OBJS) -L/usr/local/cuda/lib64/ -lcudart -lglut -L/usr/lib64-nvidia -lGL -lGLU -lX11 -lXext -lpthread
 
 $(OBJDIR)/%.o: %.cpp
 		$(CXX) $< $(CXXFLAGS) -c -o $@
