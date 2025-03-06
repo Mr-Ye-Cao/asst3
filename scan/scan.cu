@@ -200,21 +200,61 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
 // indices `i` for which `device_input[i] == device_input[i+1]`.
 //
 // Returns the total number of pairs found
+
+
+// Kernel to identify repeats
+__global__ void identify_repeats_kernel(int* input, int length, int* flags) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (i < length - 1) {
+        // Set flag to 1 if element is repeated, 0 otherwise
+        flags[i] = (input[i] == input[i+1]) ? 1 : 0;
+    } else if (i == length - 1) {
+        // Handle the last element (which can't start a repeat)
+        flags[i] = 0;
+    }
+}
+
+// Kernel to collect indices of repeats
+__global__ void collect_repeats_kernel(int* flags, int* scanned_flags, int* output, int length) {
+    unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    if (i < length - 1 && flags[i] == 1) {
+        // If this is a repeat, put its index in the corresponding position of output
+        output[scanned_flags[i]] = i;
+    }
+}
+
 int find_repeats(int* device_input, int length, int* device_output) {
-
-    // CS149 TODO:
-    //
-    // Implement this function. You will probably want to
-    // make use of one or more calls to exclusive_scan(), as well as
-    // additional CUDA kernel launches.
-    //    
-    // Note: As in the scan code, the calling code ensures that
-    // allocated arrays are a power of 2 in size, so you can use your
-    // exclusive_scan function with them. However, your implementation
-    // must ensure that the results of find_repeats are correct given
-    // the actual array length.
-
-    return 0; 
+    // 1. Create a temporary array to mark positions of repeats
+    int* device_flags;
+    cudaMalloc((void **)&device_flags, length * sizeof(int));
+    
+    // 2. Launch a kernel to identify repeats
+    int num_blocks = (length + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;
+    identify_repeats_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(device_input, length, device_flags);
+    
+    // 3. Run exclusive scan on the flags to get positions
+    int* device_scan_result;
+    cudaMalloc((void **)&device_scan_result, length * sizeof(int));
+    exclusive_scan(device_flags, length, device_scan_result);
+    
+    // 4. Get the total count of repeats (last element of scan + last flag)
+    int total_repeats;
+    int last_flag;
+    cudaMemcpy(&last_flag, &device_flags[length-1], sizeof(int), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&total_repeats, &device_scan_result[length-1], sizeof(int), cudaMemcpyDeviceToHost);
+    total_repeats += last_flag;
+    
+    // 5. Launch another kernel to collect the indices
+    collect_repeats_kernel<<<num_blocks, THREADS_PER_BLOCK>>>(
+        device_flags, device_scan_result, device_output, length);
+    
+    // 6. Clean up
+    cudaFree(device_flags);
+    cudaFree(device_scan_result);
+    
+    return total_repeats;
 }
 
 
