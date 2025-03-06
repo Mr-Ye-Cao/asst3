@@ -26,7 +26,7 @@ HOSTNAME=$(shell hostname)
 LIBS       :=
 FRAMEWORKS :=
 
-NVCCFLAGS=-O3 -m64
+NVCCFLAGS=-O3 -m64 -arch=sm_75
 
 # Clear LIBS first, then add libraries in the correct order
 LIBS :=

@@ -633,13 +633,92 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
-void
-CudaRenderer::render() {
+// Replace the existing kernelRenderCircles function with this pixel-based approach
+__global__ void kernelRenderPixels() {
+    // Each thread handles a single pixel
+    int pixelX = blockIdx.x * blockDim.x + threadIdx.x;
+    int pixelY = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    int imageWidth = cuConstRendererParams.imageWidth;
+    int imageHeight = cuConstRendererParams.imageHeight;
+    
+    // Check if this thread is responsible for a valid pixel
+    if (pixelX >= imageWidth || pixelY >= imageHeight)
+        return;
+    
+    // Get pointer to this pixel in the output image
+    int offset = 4 * (pixelY * imageWidth + pixelX);
+    float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[offset]);
+    
+    // Compute normalized coordinates for this pixel
+    float invWidth = 1.f / imageWidth;
+    float invHeight = 1.f / imageHeight;
+    float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
+                                         invHeight * (static_cast<float>(pixelY) + 0.5f));
+    
+    // Process all circles in original order to maintain the ordering requirement
+    for (int circleIdx = 0; circleIdx < cuConstRendererParams.numCircles; circleIdx++) {
+        int index3 = 3 * circleIdx;
+        
+        // Read position and radius
+        float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+        float rad = cuConstRendererParams.radius[circleIdx];
+        
+        // Quick distance check to see if this circle affects this pixel
+        float diffX = p.x - pixelCenterNorm.x;
+        float diffY = p.y - pixelCenterNorm.y;
+        float pixelDist = diffX * diffX + diffY * diffY;
+        float maxDist = rad * rad;
+        
+        // Skip if pixel is outside this circle
+        if (pixelDist > maxDist)
+            continue;
+        
+        // This circle contributes to the pixel - compute its color contribution
+        float3 rgb;
+        float alpha;
+        
+        if (cuConstRendererParams.sceneName == SNOWFLAKES || 
+            cuConstRendererParams.sceneName == SNOWFLAKES_SINGLE_FRAME) {
+            const float kCircleMaxAlpha = .5f;
+            const float falloffScale = 4.f;
 
-    // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
+            float normPixelDist = sqrt(pixelDist) / rad;
+            rgb = lookupColor(normPixelDist);
 
-    kernelRenderCircles<<<gridDim, blockDim>>>();
+            float maxAlpha = .6f + .4f * (1.f-p.z);
+            maxAlpha = kCircleMaxAlpha * fmaxf(fminf(maxAlpha, 1.f), 0.f);
+            alpha = maxAlpha * exp(-1.f * falloffScale * normPixelDist * normPixelDist);
+        } else {
+            // Simple: each circle has an assigned color
+            rgb = *(float3*)&(cuConstRendererParams.color[index3]);
+            alpha = .5f;
+        }
+        
+        // Blend this circle's contribution with the current pixel color
+        float oneMinusAlpha = 1.f - alpha;
+        
+        // Read current color, apply blending, and write back
+        float4 existingColor = *imgPtr;
+        float4 newColor;
+        newColor.x = alpha * rgb.x + oneMinusAlpha * existingColor.x;
+        newColor.y = alpha * rgb.y + oneMinusAlpha * existingColor.y;
+        newColor.z = alpha * rgb.z + oneMinusAlpha * existingColor.z;
+        newColor.w = alpha + existingColor.w;
+        
+        *imgPtr = newColor;
+    }
+}
+
+// Update the render method to use our pixel-based kernel
+void CudaRenderer::render() {
+    // Set up a 2D grid where each thread processes one pixel
+    dim3 blockDim(16, 16);  // 256 threads per block in a 16x16 arrangement
+    dim3 gridDim(
+        (image->width + blockDim.x - 1) / blockDim.x,
+        (image->height + blockDim.y - 1) / blockDim.y);
+    
+    // Launch our pixel-based kernel
+    kernelRenderPixels<<<gridDim, blockDim>>>();
     cudaDeviceSynchronize();
 }
